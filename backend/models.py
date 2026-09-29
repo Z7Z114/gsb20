@@ -70,6 +70,7 @@ class BehaviorRecord(Base):
     recorded_at = Column(DateTime, default=datetime.utcnow)
     notes = Column(Text)
     target_behavior = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
     child = relationship("Child", back_populates="behavior_records")
 

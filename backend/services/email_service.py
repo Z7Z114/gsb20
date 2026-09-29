@@ -133,7 +133,7 @@ class EmailService:
         try:
             encrypted_md = self.encrypt_content(markdown_content)
             encrypted_transcript = self.encrypt_content(full_transcript) if full_transcript else ""
-            key_for_recipient = base64.urlsafe_b64encode(self.encryption_key).decode('utf-8')
+            key_for_recipient = self.encryption_key.decode('utf-8')
             results["encryption_key"] = key_for_recipient
 
         except Exception as e:

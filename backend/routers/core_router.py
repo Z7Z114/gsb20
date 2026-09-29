@@ -54,6 +54,15 @@ def get_team_members(db: Session = Depends(get_db)):
 
 @router.post("/meetings", response_model=MeetingSchema)
 def create_meeting(meeting: MeetingCreate, db: Session = Depends(get_db)):
+    child = db.query(Child).filter(Child.id == meeting.child_id).first()
+    if not child:
+        raise HTTPException(status_code=404, detail="Child not found")
+
+    for member_id in meeting.participant_ids:
+        member = db.query(TeamMember).filter(TeamMember.id == member_id).first()
+        if not member:
+            raise HTTPException(status_code=404, detail=f"Team member {member_id} not found")
+
     db_meeting = Meeting(
         child_id=meeting.child_id,
         title=meeting.title,
@@ -93,7 +102,7 @@ def get_meeting(meeting_id: int, db: Session = Depends(get_db)):
 @router.post("/behavior-records", response_model=BehaviorRecordSchema)
 def create_behavior_record(record: BehaviorRecordCreate, db: Session = Depends(get_db)):
     db_record = BehaviorRecord(
-        **record.dict(exclude_unset=True),
+        **record.dict(exclude={"recorded_at"}),
         recorded_at=record.recorded_at or datetime.utcnow()
     )
     db.add(db_record)
@@ -114,7 +123,7 @@ def get_behavior_chart_data(child_id: int, db: Session = Depends(get_db)):
             date=record.recorded_at.strftime("%Y-%m-%d") if record.recorded_at else "",
             behavior_type=record.behavior_type,
             frequency=record.frequency,
-            intensity=float(record.intensity) if record.intensity else None
+            intensity=float(record.intensity) if record.intensity is not None else None
         ))
 
     return chart_data

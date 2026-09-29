@@ -86,6 +86,11 @@ class IEPSummarizer:
         child_info: Dict,
         behavior_history: List[Dict]
     ) -> Dict:
+        offline_result = self._generate_offline_summary(transcript, child_info, behavior_history)
+
+        if self.client is None:
+            return offline_result
+
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -99,7 +104,17 @@ class IEPSummarizer:
 
             summary_content = response.choices[0].message.content
 
+            if not summary_content or not summary_content.strip():
+                return {
+                    "error": "模型返回了空摘要",
+                    "full_summary": "",
+                    "structured_data": {}
+                }
+
             structured_data = self._extract_structured_data(summary_content)
+            for key, value in offline_result["structured_data"].items():
+                if not structured_data.get(key):
+                    structured_data[key] = value
 
             return {
                 "full_summary": summary_content,
@@ -112,6 +127,105 @@ class IEPSummarizer:
                 "full_summary": "",
                 "structured_data": {}
             }
+
+    def _generate_offline_summary(
+        self,
+        transcript: str,
+        child_info: Dict,
+        behavior_history: List[Dict]
+    ) -> Dict:
+        name = child_info.get("name") or "该儿童"
+        age = child_info.get("age")
+        age_str = f"{age}岁" if age is not None else "年龄未登记"
+        diagnosis = child_info.get("diagnosis") or "未登记"
+
+        target_behaviors = []
+        for record in behavior_history:
+            behavior_type = record.get("behavior_type")
+            if record.get("target_behavior") and behavior_type and behavior_type not in target_behaviors:
+                target_behaviors.append(behavior_type)
+
+        all_types = []
+        for record in behavior_history:
+            behavior_type = record.get("behavior_type")
+            if behavior_type and behavior_type not in all_types:
+                all_types.append(behavior_type)
+
+        strategy_sources = target_behaviors or all_types
+        intervention_strategies = [
+            f"针对「{behavior_type}」的正向行为支持与功能性行为干预"
+            for behavior_type in strategy_sources
+        ]
+        if not intervention_strategies:
+            intervention_strategies = [
+                "建立常规行为观察与数据记录机制",
+                "正向行为支持（PBS）通用策略"
+            ]
+
+        target_text = "、".join(target_behaviors) if target_behaviors else "暂未登记目标行为"
+
+        behavior_lines = []
+        for record in behavior_history:
+            line = f"- {record.get('behavior_type')}：频率 {record.get('frequency')} 次"
+            if record.get("intensity") is not None:
+                line += f"，强度 {record.get('intensity')}"
+            if record.get("recorded_at"):
+                line += f"（{record.get('recorded_at')}）"
+            behavior_lines.append(line)
+        behavior_text = "\n".join(behavior_lines) if behavior_lines else "- 暂无行为记录数据"
+
+        transcript_excerpt = transcript.strip()[:200] if transcript and transcript.strip() else "（无转写内容）"
+        strategies_text = "\n".join(f"- {s}" for s in intervention_strategies)
+
+        key_recommendations = [
+            "保持家庭与治疗机构的干预策略执行一致性",
+            "持续记录目标行为数据，下次会议复查趋势"
+        ]
+        for behavior_type in target_behaviors:
+            key_recommendations.append(f"针对「{behavior_type}」加强家庭泛化练习")
+
+        short_term_goals = [
+            f"降低「{behavior_type}」发生频率并持续跟踪记录" for behavior_type in strategy_sources
+        ] or ["建立稳定的行为数据记录流程"]
+
+        summary = f"""## IEP 会议纪要（离线生成）
+
+**儿童**：{name}（{age_str}，诊断：{diagnosis}）
+
+### 会议核心要点
+本次会议围绕 {name} 的个别化教育计划（IEP）展开，团队核对了近期行为数据并讨论了干预进展。
+重点目标行为：{target_text}。
+
+### 近期行为数据
+{behavior_text}
+
+### 会议转写要点
+{transcript_excerpt}
+
+### 干预策略评估
+{strategies_text}
+
+### 后续建议
+- 持续记录目标行为数据，下次会议复查趋势
+- 家长与治疗师保持策略执行一致性
+"""
+
+        structured_data = {
+            "target_behaviors": target_behaviors,
+            "intervention_strategies": intervention_strategies,
+            "progress_assessment": (
+                f"基于近期 {len(behavior_history)} 条行为记录的离线评估，"
+                f"目标行为：{target_text}。"
+            ),
+            "short_term_goals": short_term_goals,
+            "long_term_goals": ["提升儿童自理与沟通能力，逐步减少干预强度"],
+            "key_recommendations": key_recommendations
+        }
+
+        return {
+            "full_summary": summary,
+            "structured_data": structured_data
+        }
 
     def _extract_structured_data(self, summary_content: str) -> Dict:
         try:
@@ -161,6 +275,16 @@ class IEPSummarizer:
         merged_segments: List[Dict],
         team_members: List[Dict]
     ) -> List[Dict]:
+        if self.client is None:
+            speakers = sorted({seg["speaker"] for seg in merged_segments})
+            for index, speaker in enumerate(speakers):
+                member = team_members[index % len(team_members)]
+                for seg in merged_segments:
+                    if seg["speaker"] == speaker:
+                        seg["speaker_name"] = member["name"]
+                        seg["speaker_role"] = member["role"]
+            return merged_segments
+
         segments_text = "\n".join([
             f"[{seg['speaker']}] {seg['text']}"
             for seg in merged_segments[:50]

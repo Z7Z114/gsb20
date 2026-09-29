@@ -21,7 +21,19 @@ async def upload_audio(meeting_id: int, file: UploadFile = File(...), db: Sessio
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
 
-    file_location = os.path.join(UPLOAD_DIR, f"meeting_{meeting_id}_{file.filename}")
+    raw_name = (file.filename or "").replace("\\", "/")
+    safe_name = os.path.basename(raw_name).strip()
+    if not safe_name or safe_name in (".", ".."):
+        safe_name = "audio.bin"
+
+    upload_root = os.path.abspath(UPLOAD_DIR)
+    file_location = os.path.join(upload_root, f"meeting_{meeting_id}_{safe_name}")
+    try:
+        contained = os.path.commonpath([upload_root, os.path.abspath(file_location)]) == upload_root
+    except ValueError:
+        contained = False
+    if not contained:
+        raise HTTPException(status_code=400, detail="Invalid filename")
 
     with open(file_location, "wb") as buffer:
         content = await file.read()
@@ -69,12 +81,6 @@ def process_meeting_background(meeting_id: int, db):
 
         audio_result = audio_processor.process_meeting_audio(meeting.audio_file_path)
 
-        meeting.transcript = audio_result["full_transcript"]
-        meeting.diarization_result = json.dumps(audio_result["diarization"], ensure_ascii=False)
-        db.commit()
-
-        print(f"[{datetime.now()}] Audio processing completed for meeting {meeting_id}")
-
         participants = db.query(MeetingParticipant).filter(
             MeetingParticipant.meeting_id == meeting_id
         ).all()
@@ -94,21 +100,6 @@ def process_meeting_background(meeting_id: int, db):
             merged_segments = iep_summarizer.identify_speaker_roles(
                 merged_segments, team_members
             )
-
-        for seg in merged_segments:
-            transcript_seg = TranscriptSegment(
-                meeting_id=meeting_id,
-                speaker=seg.get("speaker_name", seg["speaker"]),
-                speaker_role=seg.get("speaker_role", ""),
-                start_time=seg["start"],
-                end_time=seg["end"],
-                text=seg["text"]
-            )
-            db.add(transcript_seg)
-
-        db.commit()
-
-        print(f"[{datetime.now()}] Speaker identification completed for meeting {meeting_id}")
 
         child = db.query(Child).filter(Child.id == meeting.child_id).first()
         child_info = {
@@ -140,6 +131,30 @@ def process_meeting_background(meeting_id: int, db):
             behavior_history
         )
 
+        full_summary = (iep_result.get("full_summary") or "").strip()
+        if not full_summary:
+            print(f"[{datetime.now()}] Empty IEP summary for meeting {meeting_id}, marking as failed")
+            meeting.status = "failed"
+            db.commit()
+            return
+
+        db.query(TranscriptSegment).filter(
+            TranscriptSegment.meeting_id == meeting_id
+        ).delete(synchronize_session=False)
+
+        for seg in merged_segments:
+            transcript_seg = TranscriptSegment(
+                meeting_id=meeting_id,
+                speaker=seg.get("speaker_name", seg["speaker"]),
+                speaker_role=seg.get("speaker_role", ""),
+                start_time=seg["start"],
+                end_time=seg["end"],
+                text=seg["text"]
+            )
+            db.add(transcript_seg)
+
+        meeting.transcript = audio_result["full_transcript"]
+        meeting.diarization_result = json.dumps(audio_result["diarization"], ensure_ascii=False)
         meeting.iep_summary = iep_result["full_summary"]
         meeting.suggestions = json.dumps(iep_result["structured_data"], ensure_ascii=False)
         meeting.status = "completed"
@@ -149,6 +164,7 @@ def process_meeting_background(meeting_id: int, db):
 
     except Exception as e:
         print(f"[{datetime.now()}] Error processing meeting {meeting_id}: {str(e)}")
+        db.rollback()
         meeting = db.query(Meeting).filter(Meeting.id == meeting_id).first()
         if meeting:
             meeting.status = "failed"
@@ -237,7 +253,10 @@ async def send_meeting_email(meeting_id: int, db: Session = Depends(get_db)):
         meeting_data
     )
 
+    successful_recipients = set(email_result.get("success", []))
     for recipient in recipients:
+        if recipient not in successful_recipients:
+            continue
         sent_email = SentEmail(
             meeting_id=meeting_id,
             recipient=recipient,
